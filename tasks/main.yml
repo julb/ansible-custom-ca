@@ -1,0 +1,85 @@
+---
+
+- name: ca-certificates package should be installed
+  become: yes
+  ansible.builtin.yum:
+    name: ca-certificates
+    state: present
+
+- name: find the certificates already installed in the anchors
+  become: yes
+  ansible.builtin.find:
+    paths: /etc/pki/ca-trust/source/anchors
+    patterns: "{{ custom_ca_file_prefix }}*.crt"
+  register: existing_custom_cas
+
+- name: initialize a list of CA with computed name
+  no_log: yes
+  block:
+    - name: initialize a list of custom CA with computed name
+      ansible.builtin.set_fact:
+        custom_cas_with_names: []
+
+    - name: populate the list of custom CA with remote URL with computed name
+      ansible.builtin.set_fact:
+        custom_cas_with_names: "{{ custom_cas_with_names + [custom_ca_url_with_name] }}"
+      vars:
+        custom_ca_url_with_name: "{{ item | combine({'name': custom_ca_file_prefix + (item.url | checksum) + '.crt' }) }}"
+      with_items: "{{ custom_cas | selectattr('url', 'defined') }}"
+
+    - name: populate the list of custom CA with inline content with computed name
+      ansible.builtin.set_fact:
+        custom_cas_with_names: "{{ custom_cas_with_names + [custom_ca_ic_with_name] }}"
+      vars:
+        custom_ca_ic_with_name: "{{ item | combine({'name': custom_ca_file_prefix + (item.inline_content | checksum) + '.crt' }) }}"
+      with_items: "{{ custom_cas | selectattr('inline_content', 'defined') }}"
+
+- name: download remote certificate file and copy to ca-trust
+  become: yes
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "/etc/pki/ca-trust/source/anchors/{{ item.name }}"
+    mode: 0644
+    owner: root
+    group: root
+  loop: "{{ custom_cas_with_names | selectattr('url', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify:
+    - update ca trust
+
+- name: copy inline certificate to ca-trust
+  become: yes
+  ansible.builtin.copy:
+    content: "{{ item.inline_content }}"
+    dest: "/etc/pki/ca-trust/source/anchors/{{ item.name }}"
+    mode: 0644
+    owner: root
+    group: root
+  loop: "{{ custom_cas_with_names | selectattr('inline_content', 'defined') }}"
+  loop_control:
+    label: "{{ item.name }}"
+  notify:
+    - update ca trust
+
+- name: compute the list of certificates to remove
+  ansible.builtin.set_fact:
+    custom_cas_to_remove: "{{ existing_custom_cas.files | map(attribute='path') | map('basename') | list | difference(custom_cas_with_names | map(attribute='name')) }}"
+
+- name: remove managed certificates no more registered
+  become: yes
+  ansible.builtin.file:
+    path: "/etc/pki/ca-trust/source/anchors/{{ item }}"
+    state: absent
+  loop: "{{ custom_cas_to_remove }}"
+  loop_control:
+    label: "{{ item }}"
+  notify:
+    - update ca trust
+
+- name: flush handlers
+  ansible.builtin.meta: flush_handlers
+
+- name: print message with ca-bundle.crt
+  ansible.builtin.debug: 
+    msg: "all certificates are bundled in /etc/pki/tls/certs/ca-bundle.crt"

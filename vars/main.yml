@@ -1,0 +1,3 @@
+---
+# vars file for custom-ca
+custom_ca_file_prefix: mngd-by-ansible-
